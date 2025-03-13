@@ -1,0 +1,7 @@
+fastapi[standard]
+pydantic
+uvicorn
+gtts
+openai-whisper
+torch
+numpy
