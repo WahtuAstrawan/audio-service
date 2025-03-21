@@ -5,3 +5,5 @@ gtts
 openai-whisper
 torch
 numpy
+zyphra
+python-dotenv
