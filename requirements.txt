@@ -7,3 +7,7 @@ torch
 numpy
 zyphra
 python-dotenv
+nltk
+moviepy
+requests
+deep-translator
