@@ -11,3 +11,4 @@ nltk
 moviepy
 requests
 deep-translator
+google-genai

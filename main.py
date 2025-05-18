@@ -10,20 +10,16 @@ import datetime
 import base64
 import requests
 import tempfile
-import nltk
-from nltk.corpus import stopwords
 from moviepy import VideoFileClip, concatenate_videoclips, AudioFileClip
-from deep_translator import GoogleTranslator
-
-# Download necessary NLTK data
-nltk.download('punkt', quiet=True)
-nltk.download('stopwords', quiet=True)
+from google import genai
 
 # Load environment variables
 load_dotenv()
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 app = FastAPI()
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 model = whisper.load_model("base")
 zyphraClient = ZyphraClient(api_key=os.getenv("API_KEY"))
 
@@ -70,56 +66,46 @@ class GenerateVideoStoryRequest(BaseModel):
     story: str
     lang: str = "id"
     slow: bool = False
-    clip_duration: int = 1
+    clip_duration: int = 3
+    min_width: int = 1280
+    min_height: int = 720
+    video_type: str = "all"
 
 
 def extract_keywords(text: str):
-    """Extract most frequent non-stopwords from text"""
+    """
+    Extract the most relevant keyword phrases from text using Gemini AI.
+    Returns a list of keyword phrases
+    """
     try:
-        # Ensure we have the necessary NLTK data
-        if not nltk.data.find('tokenizers/punkt'):
-            nltk.download('punkt', quiet=False)
-        if not nltk.data.find('corpora/stopwords'):
-            nltk.download('stopwords', quiet=False)
-
-        # Use Indonesian stopwords
-        stop_words = set()
-        try:
-            stop_words.update(stopwords.words('indonesian'))
-        except LookupError:
-            nltk.download('stopwords', quiet=False)
-            try:
-                stop_words.update(stopwords.words('indonesian'))
-            except:
-                print("Warning: Indonesian stopwords not available")
-
-        # If no stopwords are available, use a minimal set
-        if not stop_words:
-            stop_words = {"dan", "yang", "di", "dengan", "untuk", "pada", "adalah", "ini", "itu"}
-
-        # Simple word tokenization without sentence tokenization
-        words = text.lower().split()
-
-        # Filter alphanumeric words that are not stopwords
-        filtered = [w for w in words if w.isalpha() and w not in stop_words]
-
-        # Get frequency distribution
-        freq = nltk.FreqDist(filtered)
-
-        # Return most common keywords
-        return [word for word, _ in freq.most_common()]
+        prompt = (
+            "Dari teks berikut, ekstrak frasa kata kunci yang paling relevan "
+            "untuk digunakan dalam pencarian video ilustratif. "
+            "Gunakan frasa pendek (1-5 kata) yang menggambarkan adegan atau momen penting secara urut."
+            f"Teks:\n\"{text}\"\n\n"
+            "Contoh input:pada hari minggu, saat andi bersepeda ke sekolahnya dia jatuh di jalan dan kakinya luka"
+            "Contoh output:hari minggu cerah,seorang anak,bersepeda ke sekolah,jatuh di jalan,kaki terluka"
+            "Output hanya dalam bentuk plaintext dengan format csv dan buat dalam Bahasa Inggris (tanpa penjelasan tambahan)"
+        )
+        response = gemini_client.models.generate_content(
+            model="gemini-2.0-flash", contents=prompt
+        )
+        print("OUTPUT GEMINI:")
+        print(response.text)
+        keyword_phrases = [phrase.strip() for phrase in response.text.strip().split(',')]
+        print("OUTPUT KEYWORD:")
+        print(keyword_phrases)
+        return keyword_phrases
     except Exception as e:
-        print(f"Error extracting keywords: {e}")
-        # Fallback: just split text and return first words
+        print(f"Error extracting keywords with Gemini: {e}")
+        # Fallback keyword extraction
         words = text.lower().split()
         return [w for w in words if len(w) > 3][:]
 
 
-def search_pixabay_video(keyword):
+def search_pixabay_video(keyword, min_width, min_height, video_type):
     """Search for a video on Pixabay API based on keyword"""
-    # translated_keyword = GoogleTranslator(source='auto', target='en').translate(keyword)
-    # print(translated_keyword)
-    url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&lang=id&min_width=1280&min_height=720"
+    url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={keyword}&min_width={min_width}&min_height={min_height}&video_type={video_type}"
 
     try:
         response = requests.get(url, timeout=10)
@@ -130,107 +116,18 @@ def search_pixabay_video(keyword):
         if not hits:
             return None
 
-        # Get the first hit's medium video URL (better quality than tiny)
-        # Fallback to tiny if medium is not available
+        # Get the first hit's medium video URL or small if not available
         for hit in hits:
-            if "videos" in hit and "duration" in hit:
-                if hit["duration"] < 10:
-                    if "medium" in hit["videos"]:
-                        return hit["videos"]["medium"]["url"]
-                    elif "tiny" in hit["videos"]:
-                        return hit["videos"]["tiny"]["url"]
+            if "videos" in hit:
+                if "medium" in hit["videos"]:
+                    return hit["videos"]["medium"]["url"]
+                elif "small" in hit["videos"]:
+                    return hit["videos"]["small"]["url"]
 
         return None
     except (requests.RequestException, ValueError) as e:
         print(f"Error searching Pixabay: {e}")
         return None
-
-
-@app.get('/')
-def root():
-    return {"message": "Hello, World!"}
-
-
-@app.post('/tts')
-async def text_to_speech(request: TTSRequest):
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    output_filename = os.path.join(OUTPUT_DIR, f"tts_{timestamp}.mp3")
-
-    tts = gTTS(text=request.text, lang=request.lang, slow=request.slow)
-    tts.save(output_filename)
-
-    return FileResponse(output_filename, media_type="audio/mpeg", filename=os.path.basename(output_filename))
-
-
-@app.post("/stt")
-async def speech_to_text():
-    input_audio_path = os.path.join(INPUT_DIR, "speech.mp3")
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    output_text_filename = os.path.join(OUTPUT_DIR, f"stt_{timestamp}.txt")
-
-    result = model.transcribe(input_audio_path)
-
-    with open(output_text_filename, "w") as text_file:
-        text_file.write(result["text"])
-
-    return {"text": result["text"]}
-
-
-@app.post("/sts")
-async def speech_to_speech(lang: str = "id", slow: bool = False):
-    input_audio_path = os.path.join(INPUT_DIR, "speech.mp3")
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    output_filename = os.path.join(OUTPUT_DIR, f"sts_{timestamp}.mp3")
-
-    result = model.transcribe(input_audio_path)
-    transcribed_text = result["text"]
-
-    tts = gTTS(text=transcribed_text, lang=lang, slow=slow)
-    tts.save(output_filename)
-
-    return FileResponse(output_filename, media_type="audio/mpeg", filename=os.path.basename(output_filename))
-
-
-@app.post("/tts/zyphra")
-async def text_to_speech_zyphra(request: TTSZyphra):
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    output_filename = os.path.join(OUTPUT_DIR, f"tts_zyphra_{timestamp}.mp3")
-
-    output_path = zyphraClient.audio.speech.create(
-        text=request.text,
-        speaking_rate=request.speaking_rate,
-        fmax=request.fmax,
-        pitch_std=request.pitch_std,
-        emotion=request.emotion.model_dump(),
-        language_iso_code=request.language_iso_code,
-        mime_type=request.mime_type,
-        model=request.model,
-        output_path=str(output_filename)
-    )
-
-    return FileResponse(output_path, media_type="audio/mpeg", filename=os.path.basename(output_filename))
-
-
-@app.post("/tts/clone")
-async def text_to_speech_clone(request: CloneTTSRequest):
-    input_audio_path = os.path.join(INPUT_DIR, "clone_test.wav")
-
-    with open(input_audio_path, "rb") as f:
-        audio_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    output_filename = os.path.join(OUTPUT_DIR, f"clone_{timestamp}.mp3")
-
-    output_path = zyphraClient.audio.speech.create(
-        text=request.text,
-        speaker_audio=audio_base64,
-        speaking_rate=15,
-        model="zonos-v0.1-transformer",
-        output_path=str(output_filename)
-    )
-
-    return FileResponse(output_path, media_type="audio/mpeg", filename=os.path.basename(output_filename))
-
 
 @app.post("/generate/video")
 async def generate_video_by_story(request: GenerateVideoStoryRequest):
@@ -254,7 +151,7 @@ async def generate_video_by_story(request: GenerateVideoStoryRequest):
     # Step 2: Search and download videos for each keyword
     video_paths = []
     for i, keyword in enumerate(keywords):
-        video_url = search_pixabay_video(keyword)
+        video_url = search_pixabay_video(keyword, request.min_width, request.min_height, request.video_type)
         if not video_url:
             print(f"No video found for keyword: {keyword}")
             continue
@@ -349,3 +246,88 @@ async def generate_video_by_story(request: GenerateVideoStoryRequest):
         media_type="video/mp4",
         filename=os.path.basename(output_video_path)
     )
+
+@app.get('/')
+def root():
+    return {"message": "Hello, World!"}
+
+
+@app.post('/tts')
+async def text_to_speech(request: TTSRequest):
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    output_filename = os.path.join(OUTPUT_DIR, f"tts_{timestamp}.mp3")
+
+    tts = gTTS(text=request.text, lang=request.lang, slow=request.slow)
+    tts.save(output_filename)
+
+    return FileResponse(output_filename, media_type="audio/mpeg", filename=os.path.basename(output_filename))
+
+
+@app.post("/stt")
+async def speech_to_text():
+    input_audio_path = os.path.join(INPUT_DIR, "speech.mp3")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    output_text_filename = os.path.join(OUTPUT_DIR, f"stt_{timestamp}.txt")
+
+    result = model.transcribe(input_audio_path)
+
+    with open(output_text_filename, "w") as text_file:
+        text_file.write(result["text"])
+
+    return {"text": result["text"]}
+
+
+@app.post("/sts")
+async def speech_to_speech(lang: str = "id", slow: bool = False):
+    input_audio_path = os.path.join(INPUT_DIR, "speech.mp3")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    output_filename = os.path.join(OUTPUT_DIR, f"sts_{timestamp}.mp3")
+
+    result = model.transcribe(input_audio_path)
+    transcribed_text = result["text"]
+
+    tts = gTTS(text=transcribed_text, lang=lang, slow=slow)
+    tts.save(output_filename)
+
+    return FileResponse(output_filename, media_type="audio/mpeg", filename=os.path.basename(output_filename))
+
+
+@app.post("/tts/zyphra")
+async def text_to_speech_zyphra(request: TTSZyphra):
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    output_filename = os.path.join(OUTPUT_DIR, f"tts_zyphra_{timestamp}.mp3")
+
+    output_path = zyphraClient.audio.speech.create(
+        text=request.text,
+        speaking_rate=request.speaking_rate,
+        fmax=request.fmax,
+        pitch_std=request.pitch_std,
+        emotion=request.emotion.model_dump(),
+        language_iso_code=request.language_iso_code,
+        mime_type=request.mime_type,
+        model=request.model,
+        output_path=str(output_filename)
+    )
+
+    return FileResponse(output_path, media_type="audio/mpeg", filename=os.path.basename(output_filename))
+
+
+@app.post("/tts/clone")
+async def text_to_speech_clone(request: CloneTTSRequest):
+    input_audio_path = os.path.join(INPUT_DIR, "clone_test.wav")
+
+    with open(input_audio_path, "rb") as f:
+        audio_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    output_filename = os.path.join(OUTPUT_DIR, f"clone_{timestamp}.mp3")
+
+    output_path = zyphraClient.audio.speech.create(
+        text=request.text,
+        speaker_audio=audio_base64,
+        speaking_rate=15,
+        model="zonos-v0.1-transformer",
+        output_path=str(output_filename)
+    )
+
+    return FileResponse(output_path, media_type="audio/mpeg", filename=os.path.basename(output_filename))
